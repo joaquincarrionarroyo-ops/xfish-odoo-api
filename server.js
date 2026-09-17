@@ -16,7 +16,6 @@ app.get('/api/productos', async (req, res) => {
     };
 
     const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);
-    
     if (authRes.data.error) return res.status(401).json({ error: "Credenciales rechazadas" });
 
     let sessionId = null;
@@ -30,69 +29,84 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 1. Pedir los datos base del producto
+    // 1. Datos base del producto
     const productPayload = {
       jsonrpc: "2.0", method: "call",
       params: {
         model: "product.product",
         method: "search_read",
         args: [[["sale_ok", "=", true]]],
-        kwargs: {
-           // NOTA: Usa 'uom_id' provisoriamente para Uxb. Si tienes un campo personalizado, cámbialo aquí.
-           fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id"]
-        }
+        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id"] }
       }
     };
 
-    // 2. Pedir las cantidades exactas por Ubicación y Lote (stock.quant)
+    // 2. Cantidades e Inventario
     const quantPayload = {
       jsonrpc: "2.0", method: "call",
       params: {
         model: "stock.quant",
         method: "search_read",
-        args: [[["location_id.usage", "=", "internal"]]], // Solo stock interno
+        args: [[["location_id.usage", "=", "internal"]]],
         kwargs: { fields: ["product_id", "location_id", "lot_id", "quantity"] }
       }
     };
 
-    // Ejecutar ambas consultas a la vez para que sea ultra rápido
-    const [prodRes, quantRes] = await Promise.all([
+    // 3. IDs Externos de Odoo (ir.model.data)
+    const extIdPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: {
+        model: "ir.model.data",
+        method: "search_read",
+        args: [[["model", "=", "product.product"]]],
+        kwargs: { fields: ["res_id", "module", "name"] }
+      }
+    };
+
+    // Ejecutar las 3 consultas al mismo tiempo
+    const [prodRes, quantRes, extIdRes] = await Promise.all([
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, productPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
-        axios.post(`${ODOO_URL}/web/dataset/call_kw`, quantPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
+        axios.post(`${ODOO_URL}/web/dataset/call_kw`, quantPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+        axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
     ]);
 
     const productos = prodRes.data.result || [];
     const quants = quantRes.data.result || [];
+    const extIds = extIdRes.data.result || [];
 
-    // 3. Fusionar Inventario con Productos
+    // Armar diccionario de IDs Externos
+    const extIdMap = {};
+    extIds.forEach(ext => {
+        extIdMap[ext.res_id] = `${ext.module}.${ext.name}`;
+    });
+
+    // Fusionar Productos + Inventario + IDs Externos
     const catalogo = productos.map(p => {
-        // Buscar dónde está guardado este producto
         const stockProduct = quants.filter(q => q.product_id && q.product_id[0] === p.id);
-        
         let ubicaciones = {};
         let lotes = new Set();
         let total = 0;
 
         stockProduct.forEach(q => {
             if (q.quantity > 0) {
-                // Odoo devuelve "WH/Stock/Barracas". Extraemos solo la última palabra y la pasamos a mayúsculas.
                 let locName = q.location_id[1].split('/').pop().toUpperCase();
                 ubicaciones[locName] = (ubicaciones[locName] || 0) + q.quantity;
                 total += q.quantity;
-                
-                // Si tiene número de lote, lo guardamos
                 if (q.lot_id) lotes.add(q.lot_id[1]);
             }
         });
 
+        // Si Odoo no tiene el ID externo guardado, creamos el formato oficial "__export__."
+        const idExternoOficial = extIdMap[p.id] || `__export__.product_product_${p.id}`;
+
         return {
             id: p.id,
+            id_externo: idExternoOficial, // <-- Acá viaja el ID Externo
             sku: p.default_code,
             nombre: p.display_name,
             precio: p.lst_price,
             foto: p.image_128,
-            qxb: p.uom_id ? p.uom_id[1] : '1', // Unidades por bulto
-            lotes: Array.from(lotes).join(', '), // Lotes combinados
+            qxb: p.uom_id ? p.uom_id[1] : '1',
+            lotes: Array.from(lotes).join(', '),
             ubicaciones: ubicaciones,
             total: total
         };

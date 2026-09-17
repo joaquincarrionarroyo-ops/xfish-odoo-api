@@ -3,16 +3,30 @@ const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
-app.use(cors());
+
+// 🛡️ CORS Configurado: Permite recibir la contraseña desde tu web
+app.use(cors({
+    origin: '*', // Opcional: Aquí puedes poner ['https://tusitio.com'] para más seguridad
+    allowedHeaders: ['Content-Type', 'x-odoo-password'] // Permitimos el header personalizado
+}));
+
 app.use(express.json());
 
-const { ODOO_URL, ODOO_DB, ODOO_USER, ODOO_API_KEY } = process.env;
+const { ODOO_URL, ODOO_DB, ODOO_USER } = process.env; 
+// NOTA: Ya no leemos ODOO_API_KEY desde process.env
 
 app.get('/api/productos', async (req, res) => {
   try {
+    // 🔐 Leer la contraseña que envía el Frontend
+    const ODOO_API_KEY = req.headers['x-odoo-password'];
+
+    if (!ODOO_API_KEY) {
+        return res.status(401).json({ error: "Acceso denegado: Falta la contraseña." });
+    }
+
     const authPayload = {
       jsonrpc: "2.0", method: "call",
-      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY }
+      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY } // Usamos la contraseña inyectada
     };
 
     const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);
@@ -29,40 +43,10 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 1. Datos base del producto
-    const productPayload = {
-      jsonrpc: "2.0", method: "call",
-      params: {
-        model: "product.product",
-        method: "search_read",
-        args: [[["sale_ok", "=", true]]],
-        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id"] }
-      }
-    };
+    const productPayload = { jsonrpc: "2.0", method: "call", params: { model: "product.product", method: "search_read", args: [[["sale_ok", "=", true]]], kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id"] } } };
+    const quantPayload = { jsonrpc: "2.0", method: "call", params: { model: "stock.quant", method: "search_read", args: [[["location_id.usage", "=", "internal"]]], kwargs: { fields: ["product_id", "location_id", "lot_id", "quantity"] } } };
+    const extIdPayload = { jsonrpc: "2.0", method: "call", params: { model: "ir.model.data", method: "search_read", args: [[["model", "=", "product.product"]]], kwargs: { fields: ["res_id", "module", "name"] } } };
 
-    // 2. Cantidades e Inventario
-    const quantPayload = {
-      jsonrpc: "2.0", method: "call",
-      params: {
-        model: "stock.quant",
-        method: "search_read",
-        args: [[["location_id.usage", "=", "internal"]]],
-        kwargs: { fields: ["product_id", "location_id", "lot_id", "quantity"] }
-      }
-    };
-
-    // 3. IDs Externos de Odoo (ir.model.data)
-    const extIdPayload = {
-      jsonrpc: "2.0", method: "call",
-      params: {
-        model: "ir.model.data",
-        method: "search_read",
-        args: [[["model", "=", "product.product"]]],
-        kwargs: { fields: ["res_id", "module", "name"] }
-      }
-    };
-
-    // Ejecutar las 3 consultas al mismo tiempo
     const [prodRes, quantRes, extIdRes] = await Promise.all([
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, productPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, quantPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
@@ -73,13 +57,9 @@ app.get('/api/productos', async (req, res) => {
     const quants = quantRes.data.result || [];
     const extIds = extIdRes.data.result || [];
 
-    // Armar diccionario de IDs Externos
     const extIdMap = {};
-    extIds.forEach(ext => {
-        extIdMap[ext.res_id] = `${ext.module}.${ext.name}`;
-    });
+    extIds.forEach(ext => { extIdMap[ext.res_id] = `${ext.module}.${ext.name}`; });
 
-    // Fusionar Productos + Inventario + IDs Externos
     const catalogo = productos.map(p => {
         const stockProduct = quants.filter(q => q.product_id && q.product_id[0] === p.id);
         let ubicaciones = {};
@@ -95,12 +75,9 @@ app.get('/api/productos', async (req, res) => {
             }
         });
 
-        // Si Odoo no tiene el ID externo guardado, creamos el formato oficial "__export__."
-        const idExternoOficial = extIdMap[p.id] || `__export__.product_product_${p.id}`;
-
         return {
             id: p.id,
-            id_externo: idExternoOficial, // <-- Acá viaja el ID Externo
+            id_externo: extIdMap[p.id] || `__export__.product_product_${p.id}`,
             sku: p.default_code,
             nombre: p.display_name,
             precio: p.lst_price,
@@ -113,7 +90,6 @@ app.get('/api/productos', async (req, res) => {
     });
 
     res.json(catalogo);
-
   } catch (error) {
     console.error("Error conectando con Odoo:", error.message);
     res.status(500).json({ error: "Error interno" });

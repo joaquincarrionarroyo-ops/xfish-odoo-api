@@ -53,7 +53,7 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 📸 Usamos image_512 para alta calidad y traemos product_tmpl_id para categorías y etiquetas
+    // 📸 Usamos image_256 para mantener gran calidad visual sin saturar la memoria RAM (512MB)
     const productPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -61,42 +61,22 @@ app.get('/api/productos', async (req, res) => {
         model: "product.product", 
         method: "search_read", 
         args: [[["sale_ok", "=", true]]], 
-        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_512", "uom_id", "categ_id", "product_tmpl_id"] } 
+        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_256", "uom_id", "categ_id"] } 
       } 
     };
     
-    // Consulta complementaria para obtener las etiquetas comerciales de las plantillas de Odoo
-    const templatePayload = {
-      jsonrpc: "2.0",
-      method: "call",
-      params: {
-        model: "product.template",
-        method: "search_read",
-        args: [[]],
-        kwargs: { fields: ["id", "tag_ids"] }
-      }
-    };
-
     const quantPayload = { jsonrpc: "2.0", method: "call", params: { model: "stock.quant", method: "search_read", args: [[["location_id.usage", "=", "internal"]]], kwargs: { fields: ["product_id", "location_id", "lot_id", "quantity"] } } };
     const extIdPayload = { jsonrpc: "2.0", method: "call", params: { model: "ir.model.data", method: "search_read", args: [[["model", "=", "product.product"]]], kwargs: { fields: ["res_id", "module", "name"] } } };
 
-    const [prodRes, tempRes, quantRes, extIdRes] = await Promise.all([
+    const [prodRes, quantRes, extIdRes] = await Promise.all([
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, productPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
-        axios.post(`${ODOO_URL}/web/dataset/call_kw`, templatePayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, quantPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
     ]);
 
     const productos = prodRes.data.result || [];
-    const templates = tempRes.data.result || [];
     const quants = quantRes.data.result || [];
     const extIds = extIdRes.data.result || [];
-
-    // Mapear etiquetas de templates por ID
-    const templateTagsMap = {};
-    templates.forEach(t => {
-        templateTagsMap[t.id] = t.tag_ids || []; // Odoo suele devolver nombres o IDs de etiquetas según versión
-    });
 
     const extIdMap = {};
     extIds.forEach(ext => { extIdMap[ext.res_id] = `${ext.module}.${ext.name}`; });
@@ -121,20 +101,15 @@ app.get('/api/productos', async (req, res) => {
             nombreCategoria = p.categ_id[1];
         }
 
-        // Obtener ID de la plantilla para extraer sus etiquetas comerciales
-        let tmplId = p.product_tmpl_id ? p.product_tmpl_id[0] : null;
-        let etiquetasComerciales = tmplId ? (templateTagsMap[tmplId] || []) : [];
-
         return {
             id: p.id,
             id_externo: extIdMap[p.id] || `__export__.product_product_${p.id}`,
             sku: p.default_code,
             nombre: p.display_name,
             precio: p.lst_price,
-            foto: p.image_512, // 📸 Imagen de alta resolución
+            foto: p.image_256, // 📸 Resolución equilibrada optimizada para RAM
             qxb: p.uom_id ? p.uom_id[1] : '1',
             categ_id: nombreCategoria,
-            tag_ids: etiquetasComerciales, // 🏷️ Etiquetas del comercio
             lotes: Array.from(lotes).join(', '),
             ubicaciones: ubicaciones,
             total: total

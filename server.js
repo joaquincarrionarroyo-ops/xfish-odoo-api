@@ -23,7 +23,7 @@ app.get('/api/productos', async (req, res) => {
         return res.status(401).json({ error: "Credenciales rechazadas" });
     }
 
-    // 👇 ODOO 18 FIX: Extraer session_id directamente de las Cookies (Headers) 👇
+    // Extraer session_id de las Cookies (Fix Odoo 18)
     let sessionId = null;
     const cookies = authRes.headers['set-cookie'];
     
@@ -34,7 +34,7 @@ app.get('/api/productos', async (req, res) => {
         }
     }
     
-    // Fallback por si acaso Odoo lo manda a la antigua
+    // Fallback por si lo manda a la antigua
     if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
         sessionId = authRes.data.result.session_id;
     }
@@ -43,18 +43,17 @@ app.get('/api/productos', async (req, res) => {
         console.error("⛔ NO SE ENCONTRÓ LA SESIÓN. Headers:", authRes.headers);
         return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
     }
-    // 👆 FIN DEL FIX 👆
 
-    // Con el session_id correcto, pedimos los productos
+    // Buscar Variantes (product.product) con atributos y fotos
     const searchPayload = {
       jsonrpc: "2.0",
       method: "call",
       params: {
-        model: "product.template",
+        model: "product.product", // Modelo específico de variantes
         method: "search_read",
         args: [[["sale_ok", "=", true]]],
         kwargs: {
-           fields: ["name", "default_code", "list_price", "qty_available"],
+           fields: ["display_name", "default_code", "lst_price", "qty_available", "image_128"],
            limit: 50
         }
       }

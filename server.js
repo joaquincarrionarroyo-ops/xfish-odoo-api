@@ -14,7 +14,6 @@ const dominiosPermitidos = [
 
 app.use(cors({
     origin: function (origin, callback) {
-        // Permitir solicitudes sin origen (como Postman o apps móviles de prueba) o si están en la lista blanca
         if (!origin || dominiosPermitidos.some(domain => origin.startsWith(domain))) {
             callback(null, true);
         } else {
@@ -55,7 +54,18 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    const productPayload = { jsonrpc: "2.0", method: "call", params: { model: "product.product", method: "search_read", args: [[["sale_ok", "=", true]]], kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id"] } } };
+    // 📦 AGREGADO: Pedimos categ_id (categoría) y tag_ids (etiquetas)
+    const productPayload = { 
+      jsonrpc: "2.0", 
+      method: "call", 
+      params: { 
+        model: "product.product", 
+        method: "search_read", 
+        args: [[["sale_ok", "=", true]]], 
+        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id", "categ_id", "tag_ids"] } 
+      } 
+    };
+    
     const quantPayload = { jsonrpc: "2.0", method: "call", params: { model: "stock.quant", method: "search_read", args: [[["location_id.usage", "=", "internal"]]], kwargs: { fields: ["product_id", "location_id", "lot_id", "quantity"] } } };
     const extIdPayload = { jsonrpc: "2.0", method: "call", params: { model: "ir.model.data", method: "search_read", args: [[["model", "=", "product.product"]]], kwargs: { fields: ["res_id", "module", "name"] } } };
 
@@ -87,6 +97,15 @@ app.get('/api/productos', async (req, res) => {
             }
         });
 
+        // Limpiar formato de categoría (Odoo manda un array [id, "Nombre/Subcategoria"])
+        let nombreCategoria = "General";
+        if (p.categ_id && Array.isArray(p.categ_id)) {
+            nombreCategoria = p.categ_id[1];
+        }
+
+        // En Odoo las etiquetas vienen como un array de IDs, por lo que pasamos el array limpio
+        let etiquetas = p.tag_ids || [];
+
         return {
             id: p.id,
             id_externo: extIdMap[p.id] || `__export__.product_product_${p.id}`,
@@ -95,6 +114,8 @@ app.get('/api/productos', async (req, res) => {
             precio: p.lst_price,
             foto: p.image_128,
             qxb: p.uom_id ? p.uom_id[1] : '1',
+            categ_id: nombreCategoria,   // 🏷️ Categoría limpia
+            tag_ids: etiquetas,          // 🏷️ Etiquetas asociadas
             lotes: Array.from(lotes).join(', '),
             ubicaciones: ubicaciones,
             total: total

@@ -53,7 +53,7 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 1. Productos (Variantes)
+    // 1. Variantes de producto (product.product)
     const productPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -65,7 +65,7 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 2. Plantillas (para etiquetas del comercio)
+    // 2. Plantillas para etiquetas comerciales
     const templatePayload = {
       jsonrpc: "2.0",
       method: "call",
@@ -77,7 +77,7 @@ app.get('/api/productos', async (req, res) => {
       }
     };
 
-    // 3. Diccionario de Etiquetas
+    // 3. Diccionario de etiquetas
     const tagPayload = {
       jsonrpc: "2.0",
       method: "call",
@@ -101,7 +101,7 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 5. IDs Externos (product.product)
+    // 5. External IDs ESTRICTAMENTE de product.product
     const extIdPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -113,25 +113,12 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 6. IDs Externos de respaldo (product.template)
-    const extIdTmplPayload = { 
-      jsonrpc: "2.0", 
-      method: "call", 
-      params: { 
-        model: "ir.model.data", 
-        method: "search_read", 
-        args: [[["model", "=", "product.template"]]], 
-        kwargs: { fields: ["res_id", "module", "name", "complete_name"] } 
-      } 
-    };
-
-    const [prodRes, tempRes, tagRes, quantRes, extIdRes, extIdTmplRes] = await Promise.all([
+    const [prodRes, tempRes, tagRes, quantRes, extIdRes] = await Promise.all([
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, productPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, templatePayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, tagPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, quantPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
-        axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
-        axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdTmplPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
+        axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
     ]);
 
     const productos = prodRes.data.result || [];
@@ -139,9 +126,8 @@ app.get('/api/productos', async (req, res) => {
     const tagsRaw = tagRes.data.result || [];
     const quants = quantRes.data.result || [];
     const extIds = extIdRes.data.result || [];
-    const extIdsTmpl = extIdTmplRes.data.result || [];
 
-    // Mapear Nombres de Etiquetas
+    // Mapear etiquetas
     const tagsMap = {};
     tagsRaw.forEach(t => { tagsMap[t.id] = t.name; });
 
@@ -153,17 +139,11 @@ app.get('/api/productos', async (req, res) => {
         }
     });
 
-    // Mapeo exhaustivo de IDs externos completos (complete_name o module.name)
+    // Mapear External IDs exclusivos de product.product
     const extIdMap = {};
     extIds.forEach(ext => {
         const idCompleto = ext.complete_name || (ext.module && ext.name ? `${ext.module}.${ext.name}` : null);
         if (idCompleto) extIdMap[ext.res_id] = idCompleto;
-    });
-
-    const extIdTmplMap = {};
-    extIdsTmpl.forEach(ext => {
-        const idCompleto = ext.complete_name || (ext.module && ext.name ? `${ext.module}.${ext.name}` : null);
-        if (idCompleto) extIdTmplMap[ext.res_id] = idCompleto;
     });
 
     const catalogo = productos.map(p => {
@@ -189,12 +169,12 @@ app.get('/api/productos', async (req, res) => {
         const tmplId = p.product_tmpl_id ? p.product_tmpl_id[0] : null;
         const etiquetaComercial = tmplId ? (templateTagsMap[tmplId] || "Sin Etiqueta") : "Sin Etiqueta";
 
-        // Obtener ID externo real de variante o plantilla, o construir el ID nativo canónico de Odoo
-        const idExternoReal = extIdMap[p.id] || (tmplId && extIdTmplMap[tmplId]) || `__export__.product_product_${p.id}`;
+        // External ID asegurado para variante
+        const idExternoVariante = extIdMap[p.id] || `__export__.product_product_${p.id}`;
 
         return {
             id: p.id,
-            id_externo: idExternoReal,
+            id_externo: idExternoVariante,
             sku: p.default_code,
             nombre: p.display_name,
             precio: p.lst_price,

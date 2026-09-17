@@ -18,20 +18,34 @@ app.get('/api/productos', async (req, res) => {
 
     const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);
     
-    // 👇 ESTO ES LO NUEVO: CAPTURAR EL ERROR EXACTO DE ODOO 👇
     if (authRes.data.error) {
-        console.error("⛔ ODOO RECHAZÓ EL ACCESO. Motivo:", JSON.stringify(authRes.data.error, null, 2));
-        return res.status(401).json({ error: "Credenciales rechazadas por Odoo. Revisa Render." });
+        console.error("⛔ ODOO RECHAZÓ EL ACCESO:", JSON.stringify(authRes.data.error, null, 2));
+        return res.status(401).json({ error: "Credenciales rechazadas" });
     }
 
-    if (!authRes.data.result || !authRes.data.result.session_id) {
-        console.error("⛔ RESPUESTA RARA DE ODOO:", JSON.stringify(authRes.data, null, 2));
-        return res.status(401).json({ error: "Odoo no devolvió sesión." });
+    // 👇 ODOO 18 FIX: Extraer session_id directamente de las Cookies (Headers) 👇
+    let sessionId = null;
+    const cookies = authRes.headers['set-cookie'];
+    
+    if (cookies) {
+        const sessionCookie = cookies.find(c => c.startsWith('session_id='));
+        if (sessionCookie) {
+            sessionId = sessionCookie.split(';')[0].split('=')[1];
+        }
     }
-    // 👆 HASTA ACÁ 👆
+    
+    // Fallback por si acaso Odoo lo manda a la antigua
+    if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
+        sessionId = authRes.data.result.session_id;
+    }
 
-    const sessionId = authRes.data.result.session_id;
+    if (!sessionId) {
+        console.error("⛔ NO SE ENCONTRÓ LA SESIÓN. Headers:", authRes.headers);
+        return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
+    }
+    // 👆 FIN DEL FIX 👆
 
+    // Con el session_id correcto, pedimos los productos
     const searchPayload = {
       jsonrpc: "2.0",
       method: "call",

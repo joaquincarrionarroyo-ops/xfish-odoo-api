@@ -54,7 +54,7 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 📦 AGREGADO: Pedimos categ_id (categoría) y tag_ids (etiquetas)
+    // Consulta de productos con categoría y sin campos incompatibles
     const productPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -62,7 +62,7 @@ app.get('/api/productos', async (req, res) => {
         model: "product.product", 
         method: "search_read", 
         args: [[["sale_ok", "=", true]]], 
-        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id", "categ_id", "tag_ids"] } 
+        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_128", "uom_id", "categ_id"] } 
       } 
     };
     
@@ -97,14 +97,10 @@ app.get('/api/productos', async (req, res) => {
             }
         });
 
-        // Limpiar formato de categoría (Odoo manda un array [id, "Nombre/Subcategoria"])
         let nombreCategoria = "General";
         if (p.categ_id && Array.isArray(p.categ_id)) {
             nombreCategoria = p.categ_id[1];
         }
-
-        // En Odoo las etiquetas vienen como un array de IDs, por lo que pasamos el array limpio
-        let etiquetas = p.tag_ids || [];
 
         return {
             id: p.id,
@@ -114,8 +110,7 @@ app.get('/api/productos', async (req, res) => {
             precio: p.lst_price,
             foto: p.image_128,
             qxb: p.uom_id ? p.uom_id[1] : '1',
-            categ_id: nombreCategoria,   // 🏷️ Categoría limpia
-            tag_ids: etiquetas,          // 🏷️ Etiquetas asociadas
+            categ_id: nombreCategoria,
             lotes: Array.from(lotes).join(', '),
             ubicaciones: ubicaciones,
             total: total

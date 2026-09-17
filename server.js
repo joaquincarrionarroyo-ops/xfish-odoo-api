@@ -4,29 +4,41 @@ const axios = require('axios');
 
 const app = express();
 
-// 🛡️ CORS Configurado: Permite recibir la contraseña desde tu web
+// 🛡️ SEGURIDAD ESTRICTA: Lista blanca de dominios permitidos
+const dominiosPermitidos = [
+  'https://presuya.com.ar',
+  'https://www.presuya.com.ar',
+  'http://localhost',
+  'http://127.0.0.1'
+];
+
 app.use(cors({
-    origin: '*', // Opcional: Aquí puedes poner ['https://tusitio.com'] para más seguridad
-    allowedHeaders: ['Content-Type', 'x-odoo-password'] // Permitimos el header personalizado
+    origin: function (origin, callback) {
+        // Permitir solicitudes sin origen (como Postman o apps móviles de prueba) o si están en la lista blanca
+        if (!origin || dominiosPermitidos.some(domain => origin.startsWith(domain))) {
+            callback(null, true);
+        } else {
+            callback(new Error('Bloqueado por política de seguridad CORS'));
+        }
+    },
+    allowedHeaders: ['Content-Type', 'x-odoo-password']
 }));
 
 app.use(express.json());
 
 const { ODOO_URL, ODOO_DB, ODOO_USER } = process.env; 
-// NOTA: Ya no leemos ODOO_API_KEY desde process.env
 
 app.get('/api/productos', async (req, res) => {
   try {
-    // 🔐 Leer la contraseña que envía el Frontend
     const ODOO_API_KEY = req.headers['x-odoo-password'];
 
     if (!ODOO_API_KEY) {
-        return res.status(401).json({ error: "Acceso denegado: Falta la contraseña." });
+        return res.status(401).json({ error: "Acceso denegado: Falta la credencial de Odoo." });
     }
 
     const authPayload = {
       jsonrpc: "2.0", method: "call",
-      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY } // Usamos la contraseña inyectada
+      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY }
     };
 
     const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);

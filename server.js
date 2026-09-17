@@ -23,38 +23,31 @@ app.get('/api/productos', async (req, res) => {
         return res.status(401).json({ error: "Credenciales rechazadas" });
     }
 
-    // Extraer session_id de las Cookies (Fix Odoo 18)
     let sessionId = null;
     const cookies = authRes.headers['set-cookie'];
-    
     if (cookies) {
         const sessionCookie = cookies.find(c => c.startsWith('session_id='));
-        if (sessionCookie) {
-            sessionId = sessionCookie.split(';')[0].split('=')[1];
-        }
+        if (sessionCookie) sessionId = sessionCookie.split(';')[0].split('=')[1];
     }
     
-    // Fallback por si lo manda a la antigua
     if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
         sessionId = authRes.data.result.session_id;
     }
 
     if (!sessionId) {
-        console.error("⛔ NO SE ENCONTRÓ LA SESIÓN. Headers:", authRes.headers);
         return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
     }
 
-    // Buscar Variantes (product.product) con atributos y fotos
     const searchPayload = {
       jsonrpc: "2.0",
       method: "call",
       params: {
-        model: "product.product", // Modelo específico de variantes
+        model: "product.product",
         method: "search_read",
         args: [[["sale_ok", "=", true]]],
         kwargs: {
-           fields: ["display_name", "default_code", "lst_price", "qty_available", "image_128"],
-           limit: 50
+           fields: ["display_name", "default_code", "lst_price", "qty_available", "image_128"]
+           // Límite eliminado: Ahora traerá absolutamente todas las variantes
         }
       }
     };

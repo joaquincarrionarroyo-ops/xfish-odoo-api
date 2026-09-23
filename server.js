@@ -53,7 +53,7 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 1. Variantes de producto (product.product)
+    // 1. Productos (Variantes) solicitando product_template_variant_value_ids
     const productPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -61,7 +61,18 @@ app.get('/api/productos', async (req, res) => {
         model: "product.product", 
         method: "search_read", 
         args: [[["sale_ok", "=", true]]], 
-        kwargs: { fields: ["display_name", "default_code", "lst_price", "image_256", "uom_id", "categ_id", "product_tmpl_id"] } 
+        kwargs: { 
+          fields: [
+            "display_name", 
+            "default_code", 
+            "lst_price", 
+            "image_256", 
+            "uom_id", 
+            "categ_id", 
+            "product_tmpl_id",
+            "product_template_variant_value_ids"
+          ] 
+        } 
       } 
     };
 
@@ -73,7 +84,7 @@ app.get('/api/productos', async (req, res) => {
         model: "product.template", 
         method: "search_read", 
         args: [[]], 
-        kwargs: { fields: ["id", "product_tag_ids"] } 
+        kwargs: { fields: ["id", "name", "product_tag_ids"] } 
       }
     };
 
@@ -101,7 +112,7 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 5. External IDs ESTRICTAMENTE de product.product
+    // 5. External IDs de product.product
     const extIdPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -113,12 +124,25 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    const [prodRes, tempRes, tagRes, quantRes, extIdRes] = await Promise.all([
+    // 6. Consultar valores de atributos (product.template.attribute.value)
+    const variantValuesPayload = {
+      jsonrpc: "2.0",
+      method: "call",
+      params: {
+        model: "product.template.attribute.value",
+        method: "search_read",
+        args: [[]],
+        kwargs: { fields: ["id", "display_name", "attribute_id", "name"] }
+      }
+    };
+
+    const [prodRes, tempRes, tagRes, quantRes, extIdRes, varValRes] = await Promise.all([
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, productPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, templatePayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, tagPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
         axios.post(`${ODOO_URL}/web/dataset/call_kw`, quantPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
-        axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
+        axios.post(`${ODOO_URL}/web/dataset/call_kw`, extIdPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+        axios.post(`${ODOO_URL}/web/dataset/call_kw`, variantValuesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
     ]);
 
     const productos = prodRes.data.result || [];
@@ -126,17 +150,31 @@ app.get('/api/productos', async (req, res) => {
     const tagsRaw = tagRes.data.result || [];
     const quants = quantRes.data.result || [];
     const extIds = extIdRes.data.result || [];
+    const varValuesRaw = varValRes.data.result || [];
 
     // Mapear etiquetas
     const tagsMap = {};
     tagsRaw.forEach(t => { tagsMap[t.id] = t.name; });
 
     const templateTagsMap = {};
+    const templateNamesMap = {};
     templates.forEach(t => {
+        templateNamesMap[t.id] = t.name;
         if (t.product_tag_ids && Array.isArray(t.product_tag_ids)) {
             const nombres = t.product_tag_ids.map(id => tagsMap[id]).filter(Boolean);
             templateTagsMap[t.id] = nombres.join(', ');
         }
+    });
+
+    // Mapear valores de atributos por su ID
+    const attrValuesMap = {};
+    varValuesRaw.forEach(v => {
+        attrValuesMap[v.id] = {
+            id: v.id,
+            display_name: v.display_name, // Ej: "Tipo De Caña: Casting"
+            name: v.name,                 // Ej: "Casting"
+            attribute_name: v.attribute_id ? v.attribute_id[1] : "" // Ej: "Tipo De Caña"
+        };
     });
 
     // Mapear External IDs exclusivos de product.product
@@ -167,13 +205,29 @@ app.get('/api/productos', async (req, res) => {
         }
 
         const tmplId = p.product_tmpl_id ? p.product_tmpl_id[0] : null;
+        const nombreMatriz = tmplId && templateNamesMap[tmplId] ? templateNamesMap[tmplId] : p.display_name;
         const etiquetaComercial = tmplId ? (templateTagsMap[tmplId] || "Sin Etiqueta") : "Sin Etiqueta";
 
-        // External ID asegurado para variante
+        // Estructurar atributos de la variante
+        const atributosVariante = {};
+        if (p.product_template_variant_value_ids && Array.isArray(p.product_template_variant_value_ids)) {
+            p.product_template_variant_value_ids.forEach(vId => {
+                const infoVal = attrValuesMap[vId];
+                if (infoVal) {
+                    const attrKey = infoVal.attribute_name ? infoVal.attribute_name.trim() : "";
+                    if (attrKey) {
+                        atributosVariante[attrKey] = infoVal.name ? infoVal.name.trim() : "";
+                    }
+                }
+            });
+        }
+
         const idExternoVariante = extIdMap[p.id] || `__export__.product_product_${p.id}`;
 
         return {
             id: p.id,
+            tmpl_id: tmplId,
+            nombre_matriz: nombreMatriz,
             id_externo: idExternoVariante,
             sku: p.default_code,
             nombre: p.display_name,
@@ -182,6 +236,7 @@ app.get('/api/productos', async (req, res) => {
             qxb: p.uom_id ? p.uom_id[1] : '1',
             categ_id: nombreCategoria,
             etiqueta: etiquetaComercial,
+            atributos: atributosVariante, // Diccionario de atributos { "Tipo De Caña": "Casting", "Largo Cañas": "1.80 m", ... }
             lotes: Array.from(lotes).join(', '),
             ubicaciones: ubicaciones,
             total: total

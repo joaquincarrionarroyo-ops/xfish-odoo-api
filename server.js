@@ -78,8 +78,8 @@ app.get('/api/productos', async (req, res) => {
 
     // 2. Plantillas para etiquetas comerciales
     const templatePayload = {
-      jsonrpc: "2.0",
-      method: "call",
+      jsonrpc: "2.0", 
+      method: "call", 
       params: { 
         model: "product.template", 
         method: "search_read", 
@@ -90,8 +90,8 @@ app.get('/api/productos', async (req, res) => {
 
     // 3. Diccionario de etiquetas
     const tagPayload = {
-      jsonrpc: "2.0",
-      method: "call",
+      jsonrpc: "2.0", 
+      method: "call", 
       params: { 
         model: "product.tag", 
         method: "search_read", 
@@ -126,13 +126,13 @@ app.get('/api/productos', async (req, res) => {
 
     // 6. Consultar valores de atributos (product.template.attribute.value)
     const variantValuesPayload = {
-      jsonrpc: "2.0",
-      method: "call",
-      params: {
-        model: "product.template.attribute.value",
-        method: "search_read",
-        args: [[]],
-        kwargs: { fields: ["id", "display_name", "attribute_id", "name"] }
+      jsonrpc: "2.0", 
+      method: "call", 
+      params: { 
+        model: "product.template.attribute.value", 
+        method: "search_read", 
+        args: [[]], 
+        kwargs: { fields: ["id", "display_name", "attribute_id", "name"] } 
       }
     };
 
@@ -247,6 +247,56 @@ app.get('/api/productos', async (req, res) => {
   } catch (error) {
     console.error("Error conectando con Odoo:", error.message);
     res.status(500).json({ error: "Error interno" });
+  }
+});
+
+// Endpoint exclusivo bajo demanda: busca image_1920 solo cuando vas a exportar la foto en alta calidad
+app.get('/api/producto-foto-hd/:id', async (req, res) => {
+  try {
+    const ODOO_API_KEY = req.headers['x-odoo-password'];
+    const prodId = parseInt(req.params.id);
+    if (!ODOO_API_KEY || isNaN(prodId)) {
+        return res.status(400).json({ error: "Parámetros inválidos" });
+    }
+
+    const authPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY }
+    };
+
+    const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);
+    let sessionId = null;
+    const cookies = authRes.headers['set-cookie'];
+    if (cookies) {
+        const sessionCookie = cookies.find(c => c.startsWith('session_id='));
+        if (sessionCookie) sessionId = sessionCookie.split(';')[0].split('=')[1];
+    }
+    if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
+        sessionId = authRes.data.result.session_id;
+    }
+
+    const hdPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: {
+        model: "product.product",
+        method: "read",
+        args: [[prodId], ["image_1920"]]
+      }
+    };
+
+    const hdRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, hdPayload, {
+      headers: { 'Cookie': `session_id=${sessionId}` }
+    });
+
+    const result = hdRes.data.result;
+    if (result && result.length > 0 && result[0].image_1920) {
+      return res.json({ foto_hd: result[0].image_1920 });
+    }
+
+    res.status(404).json({ error: "No se encontró imagen HD" });
+  } catch (error) {
+    console.error("Error al traer imagen HD:", error.message);
+    res.status(500).json({ error: "Error interno obteniendo HD" });
   }
 });
 

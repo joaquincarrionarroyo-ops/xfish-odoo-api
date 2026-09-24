@@ -110,7 +110,6 @@ app.get('/api/productos', async (req, res) => {
             nombre: p.display_name,
             precio: p.lst_price,
             foto: p.image_256,
-            ico: p.x_studio_ico || '-',
             categ_id: nombreCategoria,
             total: total
         };
@@ -122,7 +121,7 @@ app.get('/api/productos', async (req, res) => {
   }
 });
 
-// 2. ENDPOINT: RESUMEN DE MOVIMIENTOS GLOBALES (ENTRADAS/SALIDAS)
+// 2. ENDPOINT: RESUMEN DE MOVIMIENTOS GLOBALES
 app.post('/api/movimientos-resumen', async (req, res) => {
   try {
     const ODOO_API_KEY = req.headers['x-odoo-password'];
@@ -135,13 +134,11 @@ app.post('/api/movimientos-resumen', async (req, res) => {
     let sessionId = null;
     if (authRes.headers['set-cookie']) sessionId = authRes.headers['set-cookie'].find(c => c.startsWith('session_id=')).split(';')[0].split('=')[1];
 
-    // Traer todos los tipos de ubicaciones para saber si son internas o externas
     const locPayload = { jsonrpc: "2.0", method: "call", params: { model: "stock.location", method: "search_read", args: [[]], kwargs: { fields: ["id", "usage"] } } };
     const locRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, locPayload, { headers: { 'Cookie': `session_id=${sessionId}` } });
     const locMap = {};
     (locRes.data.result || []).forEach(l => locMap[l.id] = l.usage);
 
-    // Filtros de fecha
     let domain = [["state", "=", "done"]];
     if (fecha_desde) domain.push(["date", ">=", `${fecha_desde} 00:00:00`]);
     if (fecha_hasta) domain.push(["date", "<=", `${fecha_hasta} 23:59:59`]);
@@ -166,9 +163,7 @@ app.post('/api/movimientos-resumen', async (req, res) => {
         const uOrig = locMap[m.location_id[0]];
         const uDest = locMap[m.location_dest_id[0]];
 
-        // Si viene de afuera y entra a interno = ENTRADA
         if (uOrig !== 'internal' && uDest === 'internal') resumen[pid].entradas += m.qty_done;
-        // Si sale de interno hacia afuera = SALIDA
         if (uOrig === 'internal' && uDest !== 'internal') resumen[pid].salidas += m.qty_done;
     });
 
@@ -199,7 +194,7 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
   } catch (error) { res.status(500).json({ error: "Error obteniendo HD" }); }
 });
 
-// 4. ENDPOINT: HISTORIAL 360 DEL PRODUCTO
+// 4. ENDPOINT: HISTORIAL 360 DEL PRODUCTO (Lee ICO explícitamente)
 app.get('/api/producto-historial/:id', async (req, res) => {
   try {
     const ODOO_API_KEY = req.headers['x-odoo-password'];
@@ -212,10 +207,10 @@ app.get('/api/producto-historial/:id', async (req, res) => {
     let sessionId = null;
     if (authRes.headers['set-cookie']) sessionId = authRes.headers['set-cookie'].find(c => c.startsWith('session_id=')).split(';')[0].split('=')[1];
 
-    const infoPayload = { jsonrpc: "2.0", method: "call", params: { model: "product.product", method: "read", args: [[prodId], ["display_name", "default_code", "image_256", "lst_price", "x_studio_ico"]] } };
+    const infoPayload = { jsonrpc: "2.0", method: "call", params: { model: "product.product", method: "read", args: [[prodId], ["display_name", "default_code", "image_256", "lst_price"]] } };
     const salesPayload = { jsonrpc: "2.0", method: "call", params: { model: "sale.order.line", method: "search_read", args: [[["product_id", "=", prodId], ["state", "in", ["sale", "done"]]]], kwargs: { fields: ["order_id", "product_uom_qty", "price_unit", "create_date"], order: "create_date desc" } } };
     const purchasesPayload = { jsonrpc: "2.0", method: "call", params: { model: "purchase.order.line", method: "search_read", args: [[["product_id", "=", prodId], ["state", "in", ["purchase", "done"]]]], kwargs: { fields: ["order_id", "product_qty", "price_unit", "create_date"], order: "create_date desc" } } };
-    const movesPayload = { jsonrpc: "2.0", method: "call", params: { model: "stock.move.line", method: "search_read", args: [[["product_id", "=", prodId], ["state", "=", "done"]]], kwargs: { fields: ["reference", "location_id", "location_dest_id", "qty_done", "date"], order: "date desc", limit: 200 } } };
+    const movesPayload = { jsonrpc: "2.0", method: "call", params: { model: "stock.move.line", method: "search_read", args: [[["product_id", "=", prodId], ["state", "=", "done"]]], kwargs: { fields: ["reference", "location_id", "location_dest_id", "qty_done", "date", "picking_id"], order: "date desc", limit: 200 } } };
 
     const [infoRes, salesRes, purchRes, movesRes] = await Promise.all([
       axios.post(`${ODOO_URL}/web/dataset/call_kw`, infoPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
@@ -224,11 +219,58 @@ app.get('/api/producto-historial/:id', async (req, res) => {
       axios.post(`${ODOO_URL}/web/dataset/call_kw`, movesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
     ]);
 
+    const compras = purchRes.data.result || [];
+    const movs = movesRes.data.result || [];
     const info = infoRes.data.result && infoRes.data.result[0] ? infoRes.data.result[0] : {};
 
+    const uniqueIcos = new Set();
+
+    // EXTRACCIÓN DEL ICO DESDE LA ORDEN DE COMPRA (Lectura directa)
+    const purchaseIds = [...new Set(compras.filter(c => c.order_id).map(c => c.order_id[0]))];
+    const purchasesMap = {};
+    if (purchaseIds.length > 0) {
+        try {
+            const pRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, {
+                jsonrpc: "2.0", method: "call",
+                params: { model: "purchase.order", method: "read", args: [purchaseIds, ["ico"]] }
+            }, { headers: { 'Cookie': `session_id=${sessionId}` } });
+            
+            (pRes.data.result || []).forEach(po => {
+                if (po.ico && String(po.ico).trim() !== '') {
+                    purchasesMap[po.id] = String(po.ico).trim();
+                    uniqueIcos.add(String(po.ico).trim());
+                }
+            });
+        } catch (e) { console.log("Error leyendo purchase.order.ico"); }
+    }
+    compras.forEach(c => { c.ico = (c.order_id && purchasesMap[c.order_id[0]]) ? purchasesMap[c.order_id[0]] : '-'; });
+
+    // EXTRACCIÓN DEL ICO DESDE EL REMITO DE RECEPCIÓN (Lectura directa)
+    const pickingIds = [...new Set(movs.filter(m => m.picking_id).map(m => m.picking_id[0]))];
+    const pickingsMap = {};
+    if (pickingIds.length > 0) {
+        try {
+            const pickRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, {
+                jsonrpc: "2.0", method: "call",
+                params: { model: "stock.picking", method: "read", args: [pickingIds, ["ico"]] }
+            }, { headers: { 'Cookie': `session_id=${sessionId}` } });
+            
+            (pickRes.data.result || []).forEach(p => {
+                if (p.ico && String(p.ico).trim() !== '') {
+                    pickingsMap[p.id] = String(p.ico).trim();
+                    uniqueIcos.add(String(p.ico).trim());
+                }
+            });
+        } catch (e) { console.log("Error leyendo stock.picking.ico"); }
+    }
+    movs.forEach(m => { m.ico = (m.picking_id && pickingsMap[m.picking_id[0]]) ? pickingsMap[m.picking_id[0]] : '-'; });
+
     res.json({
-        producto: { id: info.id, nombre: info.display_name, sku: info.default_code, foto: info.image_256, precio_lista: info.lst_price, ico: info.x_studio_ico || '-' },
-        ventas: salesRes.data.result || [], compras: purchRes.data.result || [], movimientos: movesRes.data.result || []
+        producto: { id: info.id, nombre: info.display_name, sku: info.default_code, foto: info.image_256, precio_lista: info.lst_price },
+        ventas: salesRes.data.result || [], 
+        compras: compras, 
+        movimientos: movs,
+        icos_registrados: Array.from(uniqueIcos) // Mandamos los ICO detectados al frontend
     });
 
   } catch (error) { res.status(500).json({ error: "Error interno" }); }

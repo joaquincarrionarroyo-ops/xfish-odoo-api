@@ -486,3 +486,136 @@ app.get('/api/producto-historial/:id', async (req, res) => {
     res.status(500).json({ error: "Error interno obteniendo historial" });
   }
 });
+
+// NUEVO ENDPOINT: HISTORIAL 360 DEL PRODUCTO
+app.get('/api/producto-historial/:id', async (req, res) => {
+  try {
+    const ODOO_API_KEY = req.headers['x-odoo-password'];
+    const prodId = parseInt(req.params.id);
+
+    if (!ODOO_API_KEY || isNaN(prodId)) {
+        return res.status(400).json({ error: "Parámetros inválidos" });
+    }
+
+    // Autenticación
+    const authPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY }
+    };
+    const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);
+    let sessionId = null;
+    const cookies = authRes.headers['set-cookie'];
+    if (cookies) {
+        const sessionCookie = cookies.find(c => c.startsWith('session_id='));
+        if (sessionCookie) sessionId = sessionCookie.split(';')[0].split('=')[1];
+    }
+    if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
+        sessionId = authRes.data.result.session_id;
+    }
+
+    // 1. Datos básicos e imagen
+    const infoPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { model: "product.product", method: "read", args: [[prodId], ["display_name", "default_code", "image_256", "lst_price"]] }
+    };
+
+    // 2. Ventas
+    const salesPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { 
+        model: "sale.order.line", method: "search_read", 
+        args: [[["product_id", "=", prodId], ["state", "in", ["sale", "done"]]]],
+        kwargs: { fields: ["order_id", "order_partner_id", "product_uom_qty", "price_unit", "create_date"], order: "create_date desc" }
+      }
+    };
+
+    // 3. Compras (Costo Real)
+    const purchasesPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { 
+        model: "purchase.order.line", method: "search_read", 
+        args: [[["product_id", "=", prodId], ["state", "in", ["purchase", "done"]]]],
+        kwargs: { fields: ["order_id", "partner_id", "product_qty", "price_unit", "create_date"], order: "create_date desc" }
+      }
+    };
+
+    // 4. Movimientos de stock (Traemos el picking_id para buscar el ICO después)
+    const movesPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { 
+        model: "stock.move.line", method: "search_read", 
+        args: [[["product_id", "=", prodId], ["state", "=", "done"]]],
+        kwargs: { 
+            fields: ["reference", "location_id", "location_dest_id", "qty_done", "date", "picking_id"], 
+            order: "date desc", 
+            limit: 50 
+        } 
+      }
+    };
+
+    const [infoRes, salesRes, purchRes, movesRes] = await Promise.all([
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, infoPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, salesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, purchasesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, movesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
+    ]);
+
+    const info = infoRes.data.result && infoRes.data.result[0] ? infoRes.data.result[0] : {};
+    const movs = movesRes.data.result || [];
+
+    // 5. BÚSQUEDA DEL CAMPO PERSONALIZADO "ICO" EN LA RECEPCIÓN (stock.picking)
+    // Obtenemos los IDs únicos de las recepciones que afectaron a este producto
+    const pickingIds = [...new Set(movs.filter(m => m.picking_id).map(m => m.picking_id[0]))];
+    const pickingsMap = {};
+
+    if (pickingIds.length > 0) {
+        const pickingsPayload = {
+            jsonrpc: "2.0", method: "call",
+            params: {
+                model: "stock.picking", method: "search_read",
+                args: [[["id", "in", pickingIds]]],
+                kwargs: { } // Leemos todos los campos para atrapar el custom 'ico' sin importar el nombre interno
+            }
+        };
+        try {
+            const pickRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, pickingsPayload, { headers: { 'Cookie': `session_id=${sessionId}` } });
+            const picks = pickRes.data.result || [];
+            picks.forEach(p => {
+                // Atrapamos el campo ico (puede ser ico, x_ico, x_studio_ico dependiendo de la DB)
+                pickingsMap[p.id] = p.ico || p.x_ico || p.x_studio_ico || '-';
+            });
+        } catch (e) {
+            console.log("Aviso: No se pudo leer la tabla stock.picking");
+        }
+    }
+
+    // Le inyectamos a cada movimiento su ICO correspondiente
+    movs.forEach(m => {
+        if (m.picking_id && pickingsMap[m.picking_id[0]] && pickingsMap[m.picking_id[0]] !== false) {
+            m.ico = pickingsMap[m.picking_id[0]];
+        } else {
+            m.ico = '-';
+        }
+    });
+
+    res.json({
+        producto: {
+            id: info.id,
+            nombre: info.display_name,
+            sku: info.default_code,
+            foto: info.image_256,
+            precio_lista: info.lst_price
+        },
+        ventas: salesRes.data.result || [],
+        compras: purchRes.data.result || [],
+        movimientos: movs
+    });
+
+  } catch (error) {
+    console.error("Error trayendo historial:", error.message);
+    res.status(500).json({ error: "Error interno obteniendo historial" });
+  }
+});
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`Servidor en puerto ${PORT}`));

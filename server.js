@@ -270,7 +270,7 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
 
 
 // ----------------------------------------------------
-// 3. ENDPOINT: HISTORIAL 360 DEL PRODUCTO (CON BÚSQUEDA DE ICO)
+// 3. ENDPOINT: HISTORIAL 360 DEL PRODUCTO (BÚSQUEDA DE ICO CORREGIDA)
 // ----------------------------------------------------
 app.get('/api/producto-historial/:id', async (req, res) => {
   try {
@@ -281,7 +281,6 @@ app.get('/api/producto-historial/:id', async (req, res) => {
         return res.status(400).json({ error: "Parámetros inválidos" });
     }
 
-    // Autenticación
     const authPayload = {
       jsonrpc: "2.0", method: "call",
       params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY }
@@ -317,7 +316,7 @@ app.get('/api/producto-historial/:id', async (req, res) => {
       }
     };
 
-    // C. Movimientos de stock (buscando el picking_id para rastrear el campo personalizado ICO)
+    // C. Movimientos de stock
     const movesPayload = {
       jsonrpc: "2.0", method: "call",
       params: { 
@@ -340,7 +339,9 @@ app.get('/api/producto-historial/:id', async (req, res) => {
     const compras = purchRes.data.result || [];
     const movs = movesRes.data.result || [];
 
+    // ---------------------------------------------------------------------
     // D.1. BÚSQUEDA DEL CAMPO "ICO" EN LAS ÓRDENES DE COMPRA (purchase.order)
+    // ---------------------------------------------------------------------
     const purchaseIds = [...new Set(compras.filter(c => c.order_id).map(c => c.order_id[0]))];
     const purchasesMap = {};
 
@@ -350,21 +351,20 @@ app.get('/api/producto-historial/:id', async (req, res) => {
             params: {
                 model: "purchase.order", method: "search_read",
                 args: [[["id", "in", purchaseIds]]],
-                kwargs: { fields: ["id", "ico", "x_ico", "x_studio_ico"] } 
+                kwargs: { } // <--- SECRETO: Trae TODOS los campos para no chocar con KeyError
             }
         };
         try {
             const pOrderRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, pOrderPayload, { headers: { 'Cookie': `session_id=${sessionId}` } });
             const pOrders = pOrderRes.data.result || [];
             pOrders.forEach(po => {
-                purchasesMap[po.id] = po.ico || po.x_ico || po.x_studio_ico || '-';
+                purchasesMap[po.id] = po.x_studio_ico || po.x_ico || po.ico || '-';
             });
         } catch (e) {
             console.log("No se pudo leer purchase.order", e.message);
         }
     }
 
-    // Asignar el ICO correspondiente a cada compra
     compras.forEach(c => {
         if (c.order_id && purchasesMap[c.order_id[0]] && purchasesMap[c.order_id[0]] !== false) {
             c.ico = purchasesMap[c.order_id[0]];
@@ -373,10 +373,12 @@ app.get('/api/producto-historial/:id', async (req, res) => {
         }
     });
 
+    // ---------------------------------------------------------------------
     // D.2. BÚSQUEDA DEL CAMPO "ICO" EN LAS RECEPCIONES (stock.picking)
+    // ---------------------------------------------------------------------
     const pickingIds = [...new Set(movs.filter(m => m.picking_id).map(m => m.picking_id[0]))];
     const pickingsMap = {};
-    const uniqueIcos = new Set(); // Para mostrar en el encabezado
+    const uniqueIcos = new Set();
 
     if (pickingIds.length > 0) {
         const pickingsPayload = {
@@ -384,17 +386,17 @@ app.get('/api/producto-historial/:id', async (req, res) => {
             params: {
                 model: "stock.picking", method: "search_read",
                 args: [[["id", "in", pickingIds]]],
-                kwargs: { fields: ["id", "ico", "x_ico", "x_studio_ico"] }
+                kwargs: { } // <--- SECRETO: Trae TODOS los campos para no chocar con KeyError
             }
         };
         try {
             const pickRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, pickingsPayload, { headers: { 'Cookie': `session_id=${sessionId}` } });
             const picks = pickRes.data.result || [];
             picks.forEach(p => {
-                const icoValue = p.ico || p.x_ico || p.x_studio_ico;
-                if (icoValue) {
-                    pickingsMap[p.id] = icoValue;
-                    uniqueIcos.add(icoValue);
+                const icoValue = p.x_studio_ico || p.x_ico || p.ico;
+                if (icoValue && String(icoValue).trim() !== '') {
+                    pickingsMap[p.id] = String(icoValue).trim();
+                    uniqueIcos.add(String(icoValue).trim());
                 }
             });
         } catch (e) {
@@ -402,9 +404,8 @@ app.get('/api/producto-historial/:id', async (req, res) => {
         }
     }
 
-    // Asignar el ICO correspondiente a cada movimiento
     movs.forEach(m => {
-        if (m.picking_id && pickingsMap[m.picking_id[0]] && pickingsMap[m.picking_id[0]] !== false) {
+        if (m.picking_id && pickingsMap[m.picking_id[0]]) {
             m.ico = pickingsMap[m.picking_id[0]];
         } else {
             m.ico = '-';
@@ -415,7 +416,7 @@ app.get('/api/producto-historial/:id', async (req, res) => {
         ventas: salesRes.data.result || [],
         compras: compras,
         movimientos: movs,
-        icos_registrados: Array.from(uniqueIcos) // Los ICOs detectados
+        icos_registrados: Array.from(uniqueIcos)
     });
 
   } catch (error) {

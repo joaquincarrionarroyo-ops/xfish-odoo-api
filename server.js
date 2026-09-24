@@ -250,7 +250,7 @@ app.get('/api/productos', async (req, res) => {
   }
 });
 
-// Endpoint exclusivo bajo demanda: busca image_1920 solo cuando vas a exportar la foto en alta calidad
+// Endpoint exclusivo bajo demanda: busca la foto original en image_1920 solo cuando se va a exportar en alta calidad
 app.get('/api/producto-foto-hd/:id', async (req, res) => {
   try {
     const ODOO_API_KEY = req.headers['x-odoo-password'];
@@ -275,12 +275,13 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
         sessionId = authRes.data.result.session_id;
     }
 
+    // 1. Buscamos en product.product
     const hdPayload = {
       jsonrpc: "2.0", method: "call",
       params: {
         model: "product.product",
         method: "read",
-        args: [[prodId], ["image_1920"]]
+        args: [[prodId], ["image_1920", "product_tmpl_id"]]
       }
     };
 
@@ -288,9 +289,30 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
       headers: { 'Cookie': `session_id=${sessionId}` }
     });
 
-    const result = hdRes.data.result;
-    if (result && result.length > 0 && result[0].image_1920) {
-      return res.json({ foto_hd: result[0].image_1920 });
+    const resProd = hdRes.data.result;
+    if (resProd && resProd.length > 0) {
+      if (resProd[0].image_1920) {
+        return res.json({ foto_hd: resProd[0].image_1920 });
+      }
+
+      // 2. Si la variante no la tiene directamente, la buscamos en la plantilla
+      const tmplId = resProd[0].product_tmpl_id ? resProd[0].product_tmpl_id[0] : null;
+      if (tmplId) {
+        const tmplPayload = {
+          jsonrpc: "2.0", method: "call",
+          params: {
+            model: "product.template",
+            method: "read",
+            args: [[tmplId], ["image_1920"]]
+          }
+        };
+        const tmplRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, tmplPayload, {
+          headers: { 'Cookie': `session_id=${sessionId}` }
+        });
+        if (tmplRes.data.result && tmplRes.data.result[0].image_1920) {
+          return res.json({ foto_hd: tmplRes.data.result[0].image_1920 });
+        }
+      }
     }
 
     res.status(404).json({ error: "No se encontró imagen HD" });

@@ -53,7 +53,6 @@ app.get('/api/productos', async (req, res) => {
     }
     if (!sessionId) return res.status(401).json({ error: "Odoo no devolvió cookie de sesión." });
 
-    // 1. Productos (Variantes) solicitando product_template_variant_value_ids
     const productPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -76,7 +75,6 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 2. Plantillas para etiquetas comerciales
     const templatePayload = {
       jsonrpc: "2.0", 
       method: "call", 
@@ -88,7 +86,6 @@ app.get('/api/productos', async (req, res) => {
       }
     };
 
-    // 3. Diccionario de etiquetas
     const tagPayload = {
       jsonrpc: "2.0", 
       method: "call", 
@@ -100,7 +97,6 @@ app.get('/api/productos', async (req, res) => {
       }
     };
 
-    // 4. Stock físico
     const quantPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -112,7 +108,6 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 5. External IDs de product.product
     const extIdPayload = { 
       jsonrpc: "2.0", 
       method: "call", 
@@ -124,7 +119,6 @@ app.get('/api/productos', async (req, res) => {
       } 
     };
 
-    // 6. Consultar valores de atributos (product.template.attribute.value)
     const variantValuesPayload = {
       jsonrpc: "2.0", 
       method: "call", 
@@ -152,7 +146,6 @@ app.get('/api/productos', async (req, res) => {
     const extIds = extIdRes.data.result || [];
     const varValuesRaw = varValRes.data.result || [];
 
-    // Mapear etiquetas
     const tagsMap = {};
     tagsRaw.forEach(t => { tagsMap[t.id] = t.name; });
 
@@ -166,18 +159,16 @@ app.get('/api/productos', async (req, res) => {
         }
     });
 
-    // Mapear valores de atributos por su ID
     const attrValuesMap = {};
     varValuesRaw.forEach(v => {
         attrValuesMap[v.id] = {
             id: v.id,
-            display_name: v.display_name, // Ej: "Tipo De Caña: Casting"
-            name: v.name,                 // Ej: "Casting"
-            attribute_name: v.attribute_id ? v.attribute_id[1] : "" // Ej: "Tipo De Caña"
+            display_name: v.display_name,
+            name: v.name,
+            attribute_name: v.attribute_id ? v.attribute_id[1] : ""
         };
     });
 
-    // Mapear External IDs exclusivos de product.product
     const extIdMap = {};
     extIds.forEach(ext => {
         const idCompleto = ext.complete_name || (ext.module && ext.name ? `${ext.module}.${ext.name}` : null);
@@ -208,7 +199,6 @@ app.get('/api/productos', async (req, res) => {
         const nombreMatriz = tmplId && templateNamesMap[tmplId] ? templateNamesMap[tmplId] : p.display_name;
         const etiquetaComercial = tmplId ? (templateTagsMap[tmplId] || "Sin Etiqueta") : "Sin Etiqueta";
 
-        // Estructurar atributos de la variante
         const atributosVariante = {};
         if (p.product_template_variant_value_ids && Array.isArray(p.product_template_variant_value_ids)) {
             p.product_template_variant_value_ids.forEach(vId => {
@@ -236,7 +226,7 @@ app.get('/api/productos', async (req, res) => {
             qxb: p.uom_id ? p.uom_id[1] : '1',
             categ_id: nombreCategoria,
             etiqueta: etiquetaComercial,
-            atributos: atributosVariante, // Diccionario de atributos { "Tipo De Caña": "Casting", "Largo Cañas": "1.80 m", ... }
+            atributos: atributosVariante,
             lotes: Array.from(lotes).join(', '),
             ubicaciones: ubicaciones,
             total: total
@@ -250,7 +240,7 @@ app.get('/api/productos', async (req, res) => {
   }
 });
 
-// Endpoint exclusivo bajo demanda: busca la foto original en image_1920 solo cuando se va a exportar en alta calidad
+// Endpoint HD robusto: busca primero en variante y, si no tiene foto propia, toma image_1920 de product.template
 app.get('/api/producto-foto-hd/:id', async (req, res) => {
   try {
     const ODOO_API_KEY = req.headers['x-odoo-password'];
@@ -275,8 +265,8 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
         sessionId = authRes.data.result.session_id;
     }
 
-    // 1. Buscamos en product.product
-    const hdPayload = {
+    // 1. Consultar la variante
+    const varPayload = {
       jsonrpc: "2.0", method: "call",
       params: {
         model: "product.product",
@@ -285,17 +275,17 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
       }
     };
 
-    const hdRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, hdPayload, {
+    const varRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, varPayload, {
       headers: { 'Cookie': `session_id=${sessionId}` }
     });
 
-    const resProd = hdRes.data.result;
+    const resProd = varRes.data.result;
     if (resProd && resProd.length > 0) {
       if (resProd[0].image_1920) {
         return res.json({ foto_hd: resProd[0].image_1920 });
       }
 
-      // 2. Si la variante no la tiene directamente, la buscamos en la plantilla
+      // 2. Si la variante no la tiene asignada, buscar en product.template
       const tmplId = resProd[0].product_tmpl_id ? resProd[0].product_tmpl_id[0] : null;
       if (tmplId) {
         const tmplPayload = {
@@ -306,16 +296,18 @@ app.get('/api/producto-foto-hd/:id', async (req, res) => {
             args: [[tmplId], ["image_1920"]]
           }
         };
+
         const tmplRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, tmplPayload, {
           headers: { 'Cookie': `session_id=${sessionId}` }
         });
+
         if (tmplRes.data.result && tmplRes.data.result[0].image_1920) {
           return res.json({ foto_hd: tmplRes.data.result[0].image_1920 });
         }
       }
     }
 
-    res.status(404).json({ error: "No se encontró imagen HD" });
+    res.status(404).json({ error: "No se encontró imagen HD en Odoo" });
   } catch (error) {
     console.error("Error al traer imagen HD:", error.message);
     res.status(500).json({ error: "Error interno obteniendo HD" });

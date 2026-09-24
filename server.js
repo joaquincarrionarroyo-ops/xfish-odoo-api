@@ -171,9 +171,9 @@ app.get('/api/productos', async (req, res) => {
     varValuesRaw.forEach(v => {
         attrValuesMap[v.id] = {
             id: v.id,
-            display_name: v.display_name,
-            name: v.name,
-            attribute_name: v.attribute_id ? v.attribute_id[1] : ""
+            display_name: v.display_name, // Ej: "Tipo De Caña: Casting"
+            name: v.name,                 // Ej: "Casting"
+            attribute_name: v.attribute_id ? v.attribute_id[1] : "" // Ej: "Tipo De Caña"
         };
     });
 
@@ -250,14 +250,13 @@ app.get('/api/productos', async (req, res) => {
   }
 });
 
-// Endpoint directo al binario original de Odoo vía HTTP /web/image (resolución nativa image_1920)
-app.get('/api/foto-directa-hd/:tmplId', async (req, res) => {
+// Endpoint exclusivo bajo demanda: busca image_1920 solo cuando vas a exportar la foto en alta calidad
+app.get('/api/producto-foto-hd/:id', async (req, res) => {
   try {
     const ODOO_API_KEY = req.headers['x-odoo-password'];
-    const tmplId = parseInt(req.params.tmplId);
-
-    if (!ODOO_API_KEY || isNaN(tmplId)) {
-      return res.status(400).json({ error: "Parámetros inválidos" });
+    const prodId = parseInt(req.params.id);
+    if (!ODOO_API_KEY || isNaN(prodId)) {
+        return res.status(400).json({ error: "Parámetros inválidos" });
     }
 
     const authPayload = {
@@ -269,26 +268,125 @@ app.get('/api/foto-directa-hd/:tmplId', async (req, res) => {
     let sessionId = null;
     const cookies = authRes.headers['set-cookie'];
     if (cookies) {
-      const c = cookies.find(x => x.startsWith('session_id='));
-      if (c) sessionId = c.split(';')[0].split('=')[1];
+        const sessionCookie = cookies.find(c => c.startsWith('session_id='));
+        if (sessionCookie) sessionId = sessionCookie.split(';')[0].split('=')[1];
     }
-    if (!sessionId && authRes.data.result) sessionId = authRes.data.result.session_id;
+    if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
+        sessionId = authRes.data.result.session_id;
+    }
 
-    const urlFoto = `${ODOO_URL}/web/image?model=product.template&id=${tmplId}&field=image_1920`;
+    const hdPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: {
+        model: "product.product",
+        method: "read",
+        args: [[prodId], ["image_1920"]]
+      }
+    };
 
-    const imagenRes = await axios.get(urlFoto, {
-      headers: { 'Cookie': `session_id=${sessionId}` },
-      responseType: 'arraybuffer'
+    const hdRes = await axios.post(`${ODOO_URL}/web/dataset/call_kw`, hdPayload, {
+      headers: { 'Cookie': `session_id=${sessionId}` }
     });
 
-    const base64Data = Buffer.from(imagenRes.data, 'binary').toString('base64');
-    const contentType = imagenRes.headers['content-type'] || 'image/png';
+    const result = hdRes.data.result;
+    if (result && result.length > 0 && result[0].image_1920) {
+      return res.json({ foto_hd: result[0].image_1920 });
+    }
 
-    res.json({ foto_hd: `data:${contentType};base64,${base64Data}` });
+    res.status(404).json({ error: "No se encontró imagen HD" });
+  } catch (error) {
+    console.error("Error al traer imagen HD:", error.message);
+    res.status(500).json({ error: "Error interno obteniendo HD" });
+  }
+});
+
+// NUEVO ENDPOINT: HISTORIAL 360 DEL PRODUCTO
+app.get('/api/producto-historial/:id', async (req, res) => {
+  try {
+    const ODOO_API_KEY = req.headers['x-odoo-password'];
+    const prodId = parseInt(req.params.id);
+
+    if (!ODOO_API_KEY || isNaN(prodId)) {
+        return res.status(400).json({ error: "Parámetros inválidos" });
+    }
+
+    // Autenticación
+    const authPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { db: ODOO_DB, login: ODOO_USER, password: ODOO_API_KEY }
+    };
+    const authRes = await axios.post(`${ODOO_URL}/web/session/authenticate`, authPayload);
+    let sessionId = null;
+    const cookies = authRes.headers['set-cookie'];
+    if (cookies) {
+        const sessionCookie = cookies.find(c => c.startsWith('session_id='));
+        if (sessionCookie) sessionId = sessionCookie.split(';')[0].split('=')[1];
+    }
+    if (!sessionId && authRes.data.result && authRes.data.result.session_id) {
+        sessionId = authRes.data.result.session_id;
+    }
+
+    // 1. Datos básicos e imagen
+    const infoPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { model: "product.product", method: "read", args: [[prodId], ["display_name", "default_code", "image_256", "lst_price"]] }
+    };
+
+    // 2. Ventas (Confirmadas o Hechas)
+    const salesPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { 
+        model: "sale.order.line", method: "search_read", 
+        args: [[["product_id", "=", prodId], ["state", "in", ["sale", "done"]]]],
+        kwargs: { fields: ["order_id", "order_partner_id", "product_uom_qty", "price_unit", "create_date"], order: "create_date desc" }
+      }
+    };
+
+    // 3. Compras (Confirmadas o Hechas) -> DE AQUÍ SACAMOS EL COSTO REAL
+    const purchasesPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { 
+        model: "purchase.order.line", method: "search_read", 
+        args: [[["product_id", "=", prodId], ["state", "in", ["purchase", "done"]]]],
+        kwargs: { fields: ["order_id", "partner_id", "product_qty", "price_unit", "create_date"], order: "create_date desc" }
+      }
+    };
+
+    // 4. Movimientos de stock
+    const movesPayload = {
+      jsonrpc: "2.0", method: "call",
+      params: { 
+        model: "stock.move.line", method: "search_read", 
+        args: [[["product_id", "=", prodId], ["state", "=", "done"]]],
+        kwargs: { fields: ["reference", "location_id", "location_dest_id", "qty_done", "date"], order: "date desc", limit: 50 } // Limitamos a 50 movimientos para velocidad
+      }
+    };
+
+    const [infoRes, salesRes, purchRes, movesRes] = await Promise.all([
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, infoPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, salesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, purchasesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } }),
+      axios.post(`${ODOO_URL}/web/dataset/call_kw`, movesPayload, { headers: { 'Cookie': `session_id=${sessionId}` } })
+    ]);
+
+    const info = infoRes.data.result && infoRes.data.result[0] ? infoRes.data.result[0] : {};
+    
+    res.json({
+        producto: {
+            id: info.id,
+            nombre: info.display_name,
+            sku: info.default_code,
+            foto: info.image_256,
+            precio_lista: info.lst_price
+        },
+        ventas: salesRes.data.result || [],
+        compras: purchRes.data.result || [],
+        movimientos: movesRes.data.result || []
+    });
 
   } catch (error) {
-    console.error("Error trayendo binario HD de Odoo:", error.message);
-    res.status(500).json({ error: "Error obteniendo imagen HD binaria" });
+    console.error("Error trayendo historial:", error.message);
+    res.status(500).json({ error: "Error interno obteniendo historial" });
   }
 });
 
